@@ -8,7 +8,7 @@
  *
  * License: http://chilts.mit-license.org/2014/
  *
-**/
+ **/
 
 var crypto = require('crypto'),
     should = require('should');
@@ -27,7 +27,7 @@ function pastFromNow(secs) {
 };
 
 function nowPlusSecs(secs) {
-  return (new Date(Date.now() + secs * 1000)).toISOString();
+    return (new Date(Date.now() + secs * 1000)).toISOString();
 };
 
 module.exports = function(mongoDbClient, name, opts) {
@@ -84,6 +84,26 @@ Queue.prototype.add = function(payload, opts, callback) {
     })
 };
 
+Queue.prototype.changeVisibility = function(ack, delay, callback) {
+    var self = this;
+
+    var query = {
+        ack : ack
+    };
+
+    self.col.findAndRemove(query, function(err, msg, blah) {
+        if (err) return callback(err);
+        if ( !msg ) {
+            return callback(new Error("Queue.del(): Unidentified id : " + id));
+        }
+        var AccountsQueue = global.AccountsQueue;
+        AccountsQueue.add(msg.payload, { delay: delay }, function(err, id) {
+            callback(undefined, '' + msg._id);
+        });
+    });
+
+};
+
 Queue.prototype.get = function(callback) {
     var self = this;
 
@@ -138,11 +158,14 @@ Queue.prototype.get = function(callback) {
     })
 };
 
-Queue.prototype.getWithPriority = function(callback, account_id) {
+Queue.prototype.getWithPriority = function(callback, params) {
 
     try {
 
-        (account_id).should.be.ok;
+        (params['_id']).should.be.ok;
+
+        var account_id = params['_id'];
+        var queue_id = params['queue_id'];
 
         var self = this;
 
@@ -153,16 +176,18 @@ Queue.prototype.getWithPriority = function(callback, account_id) {
 
         //account_id assert
 
-        if(account_id != null){
+        if(account_id != null && queue_id != null){
             query = {
                 visible : { $lt : now() },
                 deleted : { $exists : false },
                 $or: [
                     {
                         'payload.account_id': account_id
+                        //'payload.Queue_id': queue_id
                     },
                     {
-                        'payload.account_id': {$exists : false}
+                        'payload.account_id': { $exists : false }
+                        //'payload.Queue_id': queue_id
                     }
                 ]
             };
@@ -268,9 +293,7 @@ Queue.prototype.del = function(ack, callback) {
     var self = this;
 
     var query = {
-        ack     : ack,
-        visible : { $gt : now() },
-        deleted : { $exists : false }
+        ack : ack
     };
     self.col.findAndRemove(query, function(err, msg, blah) {
         if (err) return callback(err);
