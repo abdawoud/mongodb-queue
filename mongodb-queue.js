@@ -13,6 +13,8 @@
 var crypto = require('crypto'),
     should = require('should');
 
+var Account = require('../../store/db/Account').Account;
+
 // some helper functions
 function id() {
     return crypto.randomBytes(16).toString('hex');
@@ -84,6 +86,37 @@ Queue.prototype.add = function(payload, opts, callback) {
     })
 };
 
+
+Queue.prototype.addUnique = function(payload, callback) {
+    var self = this;
+
+    self.col.find({'payload.Account_id': payload['Account_id']}, {limit: 1}).toArray(
+        function(err, msgs) {
+            try {
+                if(!err){
+                    if(msgs.length > 0){
+                        callback(null, '' + msgs[0]['_id']);
+                    } else {
+                        var delay = self.delay;
+                        var msg = {
+                            visible  : delay ? nowPlusSecs(delay) : now(),
+                            payload  : payload
+                        };
+                        self.col.insert(msg, function(err, results) {
+                            if (err) return callback(err);
+                            callback(null, '' + results[0]._id);
+                        })
+                    }
+                } else {
+                    callback(err);
+                }
+            } catch (exception) {
+                callback(exception);
+            }
+        }
+    );
+};
+
 Queue.prototype.changeVisibility = function(ack, delay, callback) {
     var self = this;
 
@@ -104,7 +137,25 @@ Queue.prototype.changeVisibility = function(ack, delay, callback) {
 
 };
 
-Queue.prototype.get = function(callback) {
+Queue.prototype.update = function(params, callback) {
+    var self = this;
+
+    var query = params['condition'];
+
+    var update = {
+        $set : params['update']
+    };
+
+    var options = params['options'];
+
+    self.col.update(query, update, options, function(err, num) {
+        if (err) return callback(err);
+        if (!num) return callback();
+        callback(null, num);
+    });
+};
+
+Queue.prototype.get = function(callback, params) {
     var self = this;
 
     var query = {
@@ -115,7 +166,6 @@ Queue.prototype.get = function(callback) {
         _id : 1
     };
     var update = {
-        $inc : { tries : 1 },
         $set : {
             ack     : id(),
             visible : nowPlusSecs(self.visibility)
@@ -158,89 +208,202 @@ Queue.prototype.get = function(callback) {
     })
 };
 
-Queue.prototype.getWithPriority = function(callback, params) {
+Queue.prototype.getForInfinity = function(params, callback) {
+    var self = this;
+
+    var query = params;
+
+    var sort = {
+        _id : 1
+    };
+    var update = {
+        $set : {
+            visible : nowPlusSecs(self.visibility)
+        }
+    };
+
+    self.col.findAndModify(query, sort, update, {  }, function(err, msg) {
+        if (err) return callback(err);
+        if (!msg) return callback();
+
+        // convert to an external representation
+        msg = {
+            // convert '_id' to an 'id' string
+            id      : '' + msg._id,
+            payload : msg.payload
+        };
+
+        callback(null, msg);
+    })
+};
+
+Queue.prototype.requeueTasks = function (condition, callback) {
+
+    try {
+        //remove from ToBeSentQueue and add into TasksQueue
+        var self = this;
+
+        var query = condition;
+
+        self.col.findAndRemove(query, function (err, msg) {
+            try {
+                if (err) return callback(err);
+                if (!msg) return callback();
+
+                Account.update(
+                    {
+                        _id: msg['payload']['Account_id']
+                    },
+                    {
+                        isBeingUsed: false
+                    },
+                    function(error, account){
+                        try {
+                            if(error === null){
+                                var TasksQueue = global.TasksQueue;
+
+                                delete msg['payload']['TaskQueue_id'];
+                                delete msg['payload']['Account_id'];
+
+                                TasksQueue.add(msg['payload'], function (err, msg) {
+                                });
+                                callback(null, msg['_id']);
+                            } else {
+                                callback(error);
+                            }
+                        } catch (exception) {
+                            callback(exception);
+                        }
+                    }
+                );
+
+            } catch (e) {
+                callback(e);
+            }
+        })
+    } catch (e) {
+        callback(e);
+    }
+};
+
+Queue.prototype.getStream = function(params, callback) {
+    var self = this;
+
+    var query = params['condition'];
+
+    var stream = self.col.find(query).sort({_id: 1}).stream();
+
+    callback(null, stream);
+};
+
+Queue.prototype.getWithCondition = function(params, callback) {
 
     try {
 
-        (params['_id']).should.be.ok;
+        var x = 1;
 
-        var account_id = params['_id'];
-        var queue_id = params['queue_id'];
+        (params['Account_id'].toString()).should.be.ok;
+        (params['limit']).should.be.a.Number;
+
+        var account_id = params['Account_id'];
+        var limit = params['limit'];
 
         var self = this;
 
         var query = {
-            visible : { $lt : now() },
-            deleted : { $exists : false }
+            'payload.Account_id': account_id
         };
-
-        //account_id assert
-
-        if(account_id != null && queue_id != null){
-            query = {
-                visible : { $lt : now() },
-                deleted : { $exists : false },
-                $or: [
-                    {
-                        'payload.account_id': account_id
-                        //'payload.Queue_id': queue_id
-                    },
-                    {
-                        'payload.account_id': { $exists : false }
-                        //'payload.Queue_id': queue_id
-                    }
-                ]
-            };
-        }
 
         var sort = {
             _id : 1
         };
 
-        var update = {
-            $inc : { tries : 1 },
-            $set : {
-                ack     : id(),
-                visible : nowPlusSecs(self.visibility)
-            }
-        };
-
-        self.col.findAndModify(query, sort, update, { new : true }, function(err, msg) {
-            if (err) return callback(err);
-            if (!msg) return callback();
-
-            // convert to an external representation
-            msg = {
-                // convert '_id' to an 'id' string
-                id      : '' + msg._id,
-                ack     : msg.ack,
-                payload : msg.payload,
-                tries   : msg.tries
-            };
-
-            // if we have a deadQueue, then check the tries, else don't
-            if ( self.deadQueue ) {
-                // check the tries
-                if ( msg.tries > self.maxRetries ) {
-                    // So:
-                    // 1) add this message to the deadQueue
-                    // 2) ack this message from the regular queue
-                    // 3) call ourself to return a new message (if exists)
-                    self.deadQueue.add(msg, function(err) {
-                        if (err) return callback(err);
-                        self.ack(msg.ack, function(err) {
-                            if (err) return callback(err);
-                            self.get(callback);
-                        });
-                    });
-                    return;
+        self.col.find(query, {sort: sort, limit: limit}).toArray(
+            function(err, msgs) {
+                try {
+                    if(!err){
+                        callback(null, msgs);
+                    } else {
+                        callback(err);
+                    }
+                } catch (exception) {
+                    callback(exception);
                 }
             }
-
-            callback(null, msg);
-        });
+        );
     } catch (exception) {
         callback(exception);
+    }
+};
+
+Queue.prototype.getWithPriority = function(params, callback) {
+
+    try {
+
+        (params['Account_id']).should.be.ok;
+        (params['Queue_id']).should.be.ok;
+        (params['limit']).should.be.a.Number;
+
+        var Account_id = params['Account_id'];
+        var Queue_id = params['Queue_id'];
+        var limit = params['limit'];
+
+        var self = this;
+
+        var query = {
+            visible : { $lt : now() },
+            'payload.Queue_id': Queue_id
+        };
+
+        var sort = {
+            _id : 1
+        };
+
+        self.col.find(query, {sort: sort, limit: limit}).toArray(
+            function(err, msgs) {
+                try {
+                    if(!err){
+                        var ToBeSentQueue = global.ToBeSentQueue;
+                        var counter = 0;
+                        msgs.forEach(
+                            function(msg){
+                                try {
+                                    self.col.findAndRemove({_id: msg._id}, function(err, message) {
+                                        try {
+                                            if(!err){
+                                                message['payload']['Account_id'] = Account_id;
+                                                message['payload']['TaskQueue_id'] = message._id;
+                                                ToBeSentQueue.add(message['payload'], function(err, msg){
+                                                    counter++;
+                                                    if(counter === msgs.length){
+                                                        callback(null, counter);
+                                                    }
+                                                });
+                                            } else {
+                                                callback(null, counter);
+                                            }
+                                        } catch (exception) {
+                                            callback(null, counter);
+                                        }
+                                    });
+                                } catch (exception){
+                                    callback(null, counter);
+                                }
+                            }
+                        );
+                    } else {
+                        callback(err);
+                    }
+                } catch (exception) {
+                    callback(exception);
+                }
+            }
+        );
+
+    } catch (exception) {
+
+        callback(exception);
+
     }
 
 };
@@ -289,18 +452,26 @@ Queue.prototype.ack = function(ack, callback) {
     })
 };
 
-Queue.prototype.del = function(ack, callback) {
+Queue.prototype.del = function(_id, callback) {
     var self = this;
 
-    var query = {
-        ack : ack
-    };
-    self.col.findAndRemove(query, function(err, msg, blah) {
+    self.col.findByIdAndRemove(_id, function(err, msg) {
         if (err) return callback(err);
         if ( !msg ) {
-            return callback(new Error("Queue.del(): Unidentified ack : " + ack));
+            return callback(new Error("Queue.del(): Unidentified _id : " + _id));
         }
         callback(null, '' + msg._id);
+    });
+};
+
+Queue.prototype.count = function(condition, callback) {
+    var self = this;
+
+    var query = condition;
+
+    self.col.count(query, function(err, count) {
+        if (err) return callback(err);
+        callback(null, count);
     });
 };
 
@@ -317,7 +488,7 @@ Queue.prototype.delById = function(id, callback) {
     var query = {
         _id     : id
     };
-    self.col.findAndRemove(query, function(err, msg, blah) {
+    self.col.findAndRemove(query, function(err, msg) {
         if (err) return callback(err);
         if ( !msg ) {
             return callback(new Error("Queue.del(): Unidentified id : " + id));
