@@ -239,6 +239,8 @@ Queue.prototype.getForInfinity = function(params, callback) {
 
 Queue.prototype.requeueTasks = function (condition, callback) {
 
+    var TasksQueue = global.TasksQueue;
+
     try {
         //remove from ToBeSentQueue and add into TasksQueue
         var self = this;
@@ -247,35 +249,41 @@ Queue.prototype.requeueTasks = function (condition, callback) {
 
         self.col.findAndRemove(query, function (err, msg) {
             try {
-                if (err) return callback(err);
+                if (err) {
+                    console.log(err.toString());
+                    return callback(err);
+                }
                 if (!msg) return callback();
 
-                Account.update(
-                    {
-                        _id: msg['payload']['Account_id']
-                    },
-                    {
-                        isBeingUsed: false
-                    },
-                    function(error, account){
-                        try {
-                            if(error === null){
-                                var TasksQueue = global.TasksQueue;
+                var Account_id = msg['payload']['Account_id'];
 
-                                delete msg['payload']['TaskQueue_id'];
-                                delete msg['payload']['Account_id'];
+                delete msg['payload']['TaskQueue_id'];
+                delete msg['payload']['Account_id'];
 
-                                TasksQueue.add(msg['payload'], function (err, msg) {
-                                });
-                                callback(null, msg['_id']);
-                            } else {
-                                callback(error);
-                            }
-                        } catch (exception) {
-                            callback(exception);
-                        }
+                TasksQueue.add(msg['payload'], function (err, msg) {
+                    if (err) {
+                        console.log(err.toString());
                     }
-                );
+                    Account.update(
+                        {
+                            _id: Account_id
+                        },
+                        {
+                            isBeingUsed: false
+                        },
+                        function(error, account){
+                            try {
+                                if(error === null){
+                                    callback(null, msg['_id']);
+                                } else {
+                                    callback(error);
+                                }
+                            } catch (exception) {
+                                callback(exception);
+                            }
+                        }
+                    );
+                });
 
             } catch (e) {
                 callback(e);
@@ -300,8 +308,6 @@ Queue.prototype.getWithCondition = function(params, callback) {
 
     try {
 
-        var x = 1;
-
         (params['Account_id'].toString()).should.be.ok;
         (params['limit']).should.be.a.Number;
 
@@ -318,11 +324,29 @@ Queue.prototype.getWithCondition = function(params, callback) {
             _id : 1
         };
 
-        self.col.find(query, {sort: sort, limit: limit}).toArray(
-            function(err, msgs) {
+        var key = Date.now() + '' + Math.round(Math.random() * 1000000);
+
+        self.col.update(
+            query,
+            {$set: {key: key}},
+            {multi:true},
+            function(err, num) {
                 try {
                     if(!err){
-                        callback(null, msgs);
+                        query['key'] = key;
+                        self.col.find(query, {sort: sort, limit: limit}).toArray(
+                            function(err, msgs) {
+                                try {
+                                    if(!err){
+                                        callback(null, msgs);
+                                    } else {
+                                        callback(err);
+                                    }
+                                } catch (exception) {
+                                    callback(exception);
+                                }
+                            }
+                        );
                     } else {
                         callback(err);
                     }
@@ -331,6 +355,7 @@ Queue.prototype.getWithCondition = function(params, callback) {
                 }
             }
         );
+
     } catch (exception) {
         callback(exception);
     }
@@ -347,6 +372,9 @@ Queue.prototype.getWithPriority = function(params, callback) {
         var Account_id = params['Account_id'];
         var Queue_id = params['Queue_id'];
         var limit = params['limit'];
+        var skip = params['skip'];
+
+        var ToBeSentQueue = global.ToBeSentQueue;
 
         var self = this;
 
@@ -359,12 +387,12 @@ Queue.prototype.getWithPriority = function(params, callback) {
             _id : 1
         };
 
-        self.col.find(query, {sort: sort, limit: limit}).toArray(
+        self.col.find(query, {sort: sort, limit: limit, skip: skip}).toArray(
             function(err, msgs) {
                 try {
                     if(!err){
-                        var ToBeSentQueue = global.ToBeSentQueue;
                         var counter = 0;
+
                         msgs.forEach(
                             function(msg){
                                 try {
@@ -488,6 +516,21 @@ Queue.prototype.delById = function(id, callback) {
     var query = {
         _id     : id
     };
+    self.col.findAndRemove(query, function(err, msg) {
+        if (err) return callback(err);
+        if ( !msg ) {
+            return callback(new Error("Queue.del(): Unidentified id : " + id));
+        }
+        callback(null, '' + msg._id);
+    });
+
+};
+
+Queue.prototype.delByCondition = function(condition, callback) {
+    var self = this;
+
+    var query = condition;
+
     self.col.findAndRemove(query, function(err, msg) {
         if (err) return callback(err);
         if ( !msg ) {
