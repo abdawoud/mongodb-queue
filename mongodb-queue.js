@@ -14,6 +14,8 @@ var crypto = require('crypto'),
     should = require('should');
 
 var Account = require('../../store/db/Account').Account;
+var Task = require('../../store/db/Task').Task;
+var constants = require('../../helpers/constants');
 
 // some helper functions
 function id() {
@@ -76,13 +78,20 @@ Queue.prototype.add = function(payload, opts, callback) {
         opts = {}
     }
     var delay = opts.delay || self.delay;
+    var visible = payload['old_visible'];
+    if(visible === undefined){
+        visible = delay ? nowPlusSecs(delay) : now();
+    }
     var msg = {
-        visible  : delay ? nowPlusSecs(delay) : now(),
+        visible  : visible,
         payload  : payload
     };
     self.col.insert(msg, function(err, results) {
-        if (err) return callback(err);
-        callback(null, '' + results[0]._id);
+        try {
+            if (err) return callback(err);
+            callback(null, '' + results[0]._id);
+        } catch (e) {
+        }
     })
 };
 
@@ -90,31 +99,35 @@ Queue.prototype.add = function(payload, opts, callback) {
 Queue.prototype.addUnique = function(payload, callback) {
     var self = this;
 
-    self.col.find({'payload.Account_id': payload['Account_id']}, {limit: 1}).toArray(
-        function(err, msgs) {
-            try {
-                if(!err){
-                    if(msgs.length > 0){
-                        callback(null, '' + msgs[0]['_id']);
-                    } else {
-                        var delay = self.delay;
-                        var msg = {
-                            visible  : delay ? nowPlusSecs(delay) : now(),
-                            payload  : payload
-                        };
-                        self.col.insert(msg, function(err, results) {
-                            if (err) return callback(err);
-                            callback(null, '' + results[0]._id);
-                        })
+    setTimeout(
+        function(){
+            self.col.find({'payload.Account_id': payload['Account_id']}, {limit: 1}).toArray(
+                function(err, msgs) {
+                    try {
+                        if(!err){
+                            if(msgs.length > 0){
+                                callback(null, '' + msgs[0]['_id']);
+                            } else {
+                                var delay = self.delay;
+                                var msg = {
+                                    visible  : delay ? nowPlusSecs(delay) : now(),
+                                    payload  : payload
+                                };
+                                self.col.insert(msg, function(err, results) {
+                                    if (err) return callback(err);
+                                    callback(null, '' + results[0]._id);
+                                })
+                            }
+                        } else {
+                            callback(err);
+                        }
+                    } catch (exception) {
+                        callback(exception);
                     }
-                } else {
-                    callback(err);
                 }
-            } catch (exception) {
-                callback(exception);
-            }
-        }
-    );
+            );
+        }, Math.round(Math.random() * 20000 + 5000)
+    )
 };
 
 Queue.prototype.changeVisibility = function(ack, delay, callback) {
@@ -240,6 +253,7 @@ Queue.prototype.getForInfinity = function(params, callback) {
 Queue.prototype.requeueTasks = function (condition, callback) {
 
     var TasksQueue = global.TasksQueue;
+    var TasksCanNotBeAdded = global.TasksCanNotBeAdded
 
     try {
         //remove from ToBeSentQueue and add into TasksQueue
@@ -255,35 +269,54 @@ Queue.prototype.requeueTasks = function (condition, callback) {
                 }
                 if (!msg) return callback();
 
-                var Account_id = msg['payload']['Account_id'];
-
-                delete msg['payload']['TaskQueue_id'];
-                delete msg['payload']['Account_id'];
-
-                TasksQueue.add(msg['payload'], function (err, msg) {
-                    if (err) {
-                        console.log(err.toString());
-                    }
-                    Account.update(
+                if(msg['payload']['TriesCount'] >= constants.MaxTriesForSending){
+                    Task.update(
                         {
-                            _id: Account_id
+                            _id: msg['payload']['Task_id']
                         },
                         {
-                            isBeingUsed: false
-                        },
-                        function(error, account){
-                            try {
-                                if(error === null){
-                                    callback(null, msg['_id']);
-                                } else {
-                                    callback(error);
-                                }
-                            } catch (exception) {
-                                callback(exception);
+                            $set:{
+                                Status: constants.TaskStatus.Fail,
+                                Reason: constants.TaskFailReason.MaxSendingTriesExceeded
                             }
+                        },
+                        function(){
+                            callback(null, msg['_id']);
                         }
                     );
-                });
+                } else {
+                    var Account_id = msg['payload']['Account_id'];
+                    delete msg['payload']['Account_id'];
+                    TasksQueue.add(msg['payload'], function (err, msg) {
+                        try {
+                            if (err) {
+                                console.log(err.toString());
+                                TasksCanNotBeAdded.add(msg['payload'], function(){});
+                            }
+                            Account.update(
+                                {
+                                    _id: Account_id
+                                },
+                                {
+                                    isBeingUsed: false
+                                },
+                                function(error, account){
+                                    try {
+                                        if(error === null){
+                                            callback(null, msg['_id']);
+                                        } else {
+                                            callback(error);
+                                        }
+                                    } catch (exception) {
+                                        callback(exception);
+                                    }
+                                }
+                            );
+                        } catch (e) {
+
+                        }
+                    });
+                }
 
             } catch (e) {
                 callback(e);
@@ -321,7 +354,7 @@ Queue.prototype.getWithCondition = function(params, callback) {
         };
 
         var sort = {
-            _id : 1
+            "payload.Campaign_id": 1
         };
 
         var key = Date.now() + '' + Math.round(Math.random() * 1000000);
@@ -340,24 +373,24 @@ Queue.prototype.getWithCondition = function(params, callback) {
                                     if(!err){
                                         callback(null, msgs);
                                     } else {
-                                        callback(err);
+                                        callback(err, []);
                                     }
                                 } catch (exception) {
-                                    callback(exception);
+                                    callback(exception, []);
                                 }
                             }
                         );
                     } else {
-                        callback(err);
+                        callback(err, []);
                     }
                 } catch (exception) {
-                    callback(exception);
+                    callback(exception, []);
                 }
             }
         );
 
     } catch (exception) {
-        callback(exception);
+        callback(exception, []);
     }
 };
 
@@ -389,33 +422,87 @@ Queue.prototype.getWithPriority = function(params, callback) {
 
         self.col.find(query, {sort: sort, limit: limit, skip: skip}).toArray(
             function(err, msgs) {
+                //consoe.log(msgs);
                 try {
                     if(!err){
                         var counter = 0;
-
+                        var counter_all = 0;
+                        var tasks_arr = [];
                         msgs.forEach(
                             function(msg){
                                 try {
                                     self.col.findAndRemove({_id: msg._id}, function(err, message) {
                                         try {
                                             if(!err){
-                                                message['payload']['Account_id'] = Account_id;
-                                                message['payload']['TaskQueue_id'] = message._id;
-                                                ToBeSentQueue.add(message['payload'], function(err, msg){
-                                                    counter++;
-                                                    if(counter === msgs.length){
-                                                        callback(null, counter);
-                                                    }
-                                                });
+                                                if(message != null){
+                                                    message['payload']['Account_id'] = Account_id;
+                                                    message['payload']['TaskQueue_id'] = message._id;
+                                                    var campaign = null;
+                                                    ToBeSentQueue.add(message['payload'], function(err, msg){
+                                                        if(err === null){
+                                                            counter++;
+                                                            campaign = JSON.parse(message['payload']['Campaign']);
+                                                            var msgs = campaign['Messages'];
+                                                            counter_all += msgs.length;
+
+                                                            var task = {
+                                                                number: message['payload']["PhoneNumber"],
+                                                                msgs: []
+                                                            };
+
+                                                            for(var i = 0; i < msgs.length; i++){
+                                                                task['msgs'].push(
+                                                                    {
+                                                                        type: msgs[i]['ID']['Type'],
+                                                                        content: msgs[i]['ID']['Body'],
+                                                                        task_id: msg,
+                                                                        extra: {
+                                                                            raw_task_id: message['payload']["Task_id"],
+                                                                            number_id: message['payload']["Number_id"],
+                                                                            campaign_id: message['payload']["Campaign_id"],
+                                                                            queue_id: params['Queue_id'],
+                                                                            user_id: message['payload']['User_id'],
+                                                                            io_id: params['io_id']
+                                                                        }
+                                                                    }
+                                                                );
+                                                            }
+
+                                                            var index = -1;
+                                                            for(var i = 0; i < tasks_arr.length; i++){
+                                                                if(tasks_arr[i]['number'] === message['payload']["PhoneNumber"]){
+                                                                    index = i;
+                                                                    break;
+                                                                }
+                                                            }
+
+                                                            if(index >= 0){
+                                                                for(var i = 0; i < task['msgs'].length; i++){
+                                                                    tasks_arr[index]['msgs'].push(task['msgs'][i]);
+                                                                }
+                                                            } else {
+                                                                tasks_arr.push(task);
+                                                            }
+
+                                                            if(counter_all === msgs.length){
+                                                                callback(null, counter, tasks_arr, counter_all);
+                                                            }
+                                                        } else {
+                                                            console.log('message_can_not_be_added:'+message['payload']['Task_id']);
+                                                        }
+                                                    });
+                                                } else {
+
+                                                }
                                             } else {
-                                                callback(null, counter);
+                                                callback(null, counter, tasks_arr, counter_all);
                                             }
                                         } catch (exception) {
-                                            callback(null, counter);
+                                            callback(null, counter, tasks_arr, counter_all);
                                         }
                                     });
                                 } catch (exception){
-                                    callback(null, counter);
+                                    callback(null, counter, tasks_arr, counter_all);
                                 }
                             }
                         );
@@ -500,6 +587,17 @@ Queue.prototype.count = function(condition, callback) {
     self.col.count(query, function(err, count) {
         if (err) return callback(err);
         callback(null, count);
+    });
+};
+
+Queue.prototype.distinct = function(condition, callback) {
+    var self = this;
+
+    var query = condition;
+
+    self.col.distinct(query, function(err, data) {
+        if (err) return callback(err);
+        callback(null, data);
     });
 };
 
